@@ -4,7 +4,7 @@ import-module .\IndexedCollection.psm1 -force
 
 new-item -ItemType directory -path (Join-path $PSScriptRoot "Collections") -ErrorAction SilentlyContinue
 
-$NewCollection = [IndexedCollection]::new(".\Collections")
+$NewCollection = [IndexedCollection]::new(".\Collections", [hashtable])
 
 $NewCollection.AddIndex("Name")
 $NewCollection.AddIndex("Length")
@@ -24,15 +24,16 @@ $MyObjects = $Items.Foreach{
         "Extension" = $_.Extension
     }
 }
-$measure = measure-command {
-    $NewCollection.AutoFlush = $false
-    $MyObjects.Foreach{
-        $NewCollection.Add($_, $true)
-    }
-
-    $NewCollection.AutoFlush = $true
-    $NewCollection.Flush()
+$NewCollection.AutoFlush = $false
+$MyObjects.Foreach{
+    $NewCollection.Add($_, $true)
 }
+
+
+$NewCollection.AutoFlush = $true
+$NewCollection.Flush()
+
+
 write-host "Took $($measure.TotalMilliseconds)ms"
 
 $result = $NewCollection.Get("Name", "wgl4_boot.ttf")
