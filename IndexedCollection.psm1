@@ -11,35 +11,190 @@ $script:jsonDataFileSerializerSettings.NullValueHandling  = [Newtonsoft.Json.Nul
 $script:jsonDataFileSerializerSettings.TypeNameHandling = [Newtonsoft.Json.TypeNameHandling]::None
 
 
+### Storage Adapters are a generic way to connect an object to a persistence store.
+### The storage adapter keeps some metrics while its alive for diagnostics.
 class IStorageAdapter {
-	[Newtonsoft.Json.JsonIgnoreAttribute()]
-    [bool] $AutoFlush
 
-	[Newtonsoft.Json.JsonIgnoreAttribute()]
-    [bool] $WasModified
-
-	[Newtonsoft.Json.JsonIgnoreAttribute()]
-    [bool] $isLoaded
-
-	[Newtonsoft.Json.JsonIgnoreAttribute()]
-    [string] $Cache
-
-    [int] $Accessed
-    [int] $Loaded
-    [int] $Updated
-    [int] $Written
+    [int] $Reads
+    [int] $Writes
+    
+    [Type] $Type
 
     IStorageAdapter () {}
 
-    [void] EnableAutoFlush() { throw "Do not call methods on an interface." }
-    [void] DisableAutoFlush() { throw "Do not call methods on an interface." }
-    [void] PreWarm() { throw "Do not call methods on an interface." }
-    [void] Load() { throw "Do not call methods on an interface." }
-    [void] Flush() { throw "Do not call methods on an interface." }
-    [void] Unload() { throw "Do not call methods on an interface." }
-    [void] Get() { throw "Do not call methods on an interface." }
+    [object] GetStatistics () { throw "Do not call methods on an interface." }
+    [object] Get() { throw "Do not call methods on an interface." }
     [void] Set() { throw "Do not call methods on an interface." }
 }
+
+class StorageAdapter : IStorageAdapter {
+
+    [int] $Reads = 0
+    [int] $Writes = 0
+
+    [Type] $Type
+    
+    StorageAdapter ([Type] $Type ) {$this.Type = $Type}
+
+    [hashtable] GetStatistics () {
+        return @{
+            "Reads" = $this.Reads
+            "Writes" = $this.Writes
+        }
+    }
+    [object] Get() { return $null}
+    [void] Set([Object] $Data) { }
+}
+
+## This storage adapter keeps objects in memory for persistence. Reads and writes to and from memory storage
+# are just reads and writes to and from memory
+class MemoryStorageAdapter : StorageAdapter {
+
+    [int] $Reads = 0
+    [int] $Writes = 0
+
+    [object] $Data
+
+    MemoryStorageAdapter ([Type] $Type) : Base ($Type) {}
+
+    [object] Get() {
+        $this.Reads ++
+        return $this.Data
+    }
+
+    [void] Set([object] $Data) {
+        $this.Writes ++
+
+        $this.Data = $Data
+    }
+}
+
+## This storage adapter uses a file for its backing source. This means all gets are direct Disk I/O and all sets are direct Disk I/O
+# This is useful if you want the same behavior as the MemoryStorageHelper but dont want to have to worry about data persistence
+# For performance use the CacheableFileStorageAdapter
+
+class FileStorageAdapter : StorageAdapter {
+
+    [System.IO.FileInfo] $File
+
+    FileStorageAdapter ([string] $Path, [Type] $Type) : Base ($Type) {
+        if (-not (test-path $Path)) {
+            new-item -itemtype file -path $Path -value "null"
+        }
+
+        $this.File = Get-Item $Path
+    }
+
+    [object] GetAsType([Type] $Type) {
+        $Content = $this.Get()
+        $obj = [Newtonsoft.Json.JsonConvert]::DeserializeObject($Content, $Type, $script:jsonDataFileSerializerSettings)
+        return $Obj
+    }
+
+    [string] Get() {
+        $this.Reads ++
+        return (Get-Content -raw $this.File)
+    }
+
+    [void] Set([string] $Data) {
+        $this.Writes ++
+
+        $json = [Newtonsoft.Json.JsonConvert]::SerializeObject($Data, $This.Type, $script:jsonDataFileSerializerSettings)
+
+        set-content -value $json -path $this.File.FullName
+    }
+}
+
+## This class is a caching version of the FileStorageAdapter
+#
+# Reads:
+# The first time an object is read it is read into a memory cache, further reads are performed from the memory cache when possible. The cache
+# can be unloaded using Unload().
+#
+# Writes:
+# Writes are done to the in memory cache first and then flushed to disk. If AutoFlush is enabled this occurs every time a write is performed.
+# If AutoFlush is disabled this will not occur. With Autoflush disabled A Get() may return a different value than what's on disk. 
+# You will have to manually call flush to achieve data persistence.
+#
+# Statistics:
+# This class also extends the statistics available for the storage adapter to include cache hits and misses
+class CacheableFileStorageAdapter : FileStorageAdapter {
+    [bool] $IsLoaded = $false
+    [object] $Cache
+    [bool] $CacheBusted = $false
+
+    [int] $CacheHits = 0
+    [int] $CacheMisses = 0
+    [int] $CacheClears = 0
+
+    [bool] $AutoFlush = $true
+
+    CacheableFileStorageAdapter ([string] $Path, [Type] $Type) : Base ($Path, $Type) {}
+
+    [hashtable] GetStatistics () {
+        return @{
+            "Reads" = $this.Reads
+            "Writes" = $this.Writes
+            "Cache Hits" = $this.CacheHits
+            "Cache Misses" = $this.CacheMisses
+            "Cache Clears" = $this.CacheClears
+        }
+    }
+
+    [void] SetCache([object] $Data) {
+        $this.Cache = $Data
+        $this.CacheBusted = $true
+        $this.IsLoaded = $true
+    }
+
+    [object] GetCache() {
+        if ($this.isLoaded) {
+            return $this.Cache
+        }
+        return $null
+    }
+
+    [void] ClearCache() {
+        $this.Cache = $null
+        $this.IsLoaded = $false
+        $this.CacheBusted = $false
+        $this.CacheClears++
+    }
+
+    [void] SetAutoFlush([bool] $enable) {
+        $this.AutoFlush = $Enable
+    }
+
+    [void] Flush () {
+        if ($this.CacheBusted) {
+            ([FileStorageAdapter] $this).Set($this.GetCache())
+        }
+    }
+
+    [void] Set ([Object] $Data) {
+        $this.SetCache($Data)
+
+        if ($this.AutoFlush) {
+            $this.Flush()
+        }
+    }
+
+    [object] Get () {
+        # If it's not in our cache go read it into our cache
+        if (-not $this.isLoaded) {
+            $this.CacheMisses ++
+            # Go out to the disk
+            $ObjectFromDisk = ([FileStorageAdapter] $this).Get()
+            $this.SetCache($ObjectFromDisk)
+        } else {
+            $this.CacheHits ++
+        }
+        
+        return $this.GetCache()
+    }
+}
+
+<#
 
 class StorageAdapter : IStorageAdapter {
 	[Newtonsoft.Json.JsonIgnoreAttribute()]
@@ -108,6 +263,7 @@ class StorageAdapter : IStorageAdapter {
         $this.isLoaded = $true
     }
 }
+<#
 
 class MemoryStorageAdapter : StorageAdapter {
     [object] $HiddenCache

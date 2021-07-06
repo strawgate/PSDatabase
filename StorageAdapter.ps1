@@ -1,6 +1,59 @@
 using module .\IndexedCollection.psm1
 
 Import-Module .\IndexedCollection.psm1 -Force
+
+remove-item "cache" -erroraction silentlycontinue
+$thisStorageAdapter = [CacheableFileStorageAdapter]::new("cache", [string])
+
+start-sleep -seconds 2
+
+$Adapters = @(
+    [CacheableFileStorageAdapter]::new("Cache", [string])
+    [StorageAdapter]::new([string])
+    [FileStorageAdapter]::new("file", [string])
+    [MemoryStorageAdapter]::new([string])
+)
+
+$item = "is simply dummy text of the printing and typesetting industry. Lorem Ipsum has been the industry's standard dummy text ever since the 1500s, when an unknown printer took a galley of type and scrambled it to make a type specimen book. It has survived not only five centuries, but also the leap into electronic typesetting, remaining essentially unchanged. It was popularised in the 1960s with the release of Letraset sheets containing Lorem Ipsum passages, and more recently with desktop publishing software like Aldus PageMaker including versions of Lorem Ipsum." * 100
+
+foreach ($Adapter in $Adapters) {
+
+    $AdapterName = $Adapter.GetType().FullName
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+
+    $one = $stopwatch.elapsedmilliseconds
+
+    $Adapter.Set($item)
+    
+    $two = $stopwatch.elapsedmilliseconds - $one
+
+    [void] ( $Adapter.Get() )
+    $Three = $stopwatch.elapsedmilliseconds - $two
+    
+    [void] ( $Adapter.Get() )
+    $Four = $stopwatch.elapsedmilliseconds - $Three
+
+    write-host "$AdapterName took $two ms to write and $three ms to read a cache miss and $four ms to read a cache hit"
+}
+<#
+ConvertTo-Json ($thisStorageAdapter.GetStatistics())
+
+write-host "Get Object 1"
+$thisStorageAdapter.Get()
+ConvertTo-Json ($thisStorageAdapter.GetStatistics())
+
+write-host "Get Object 2"
+$ThisStorageAdapter.Get()
+ConvertTo-Json ($thisStorageAdapter.GetStatistics())
+
+write-host "Set Object 1"
+$ThisStorageAdapter.Set("potato Pancakes")
+ConvertTo-Json ($thisStorageAdapter.GetStatistics())
+
+write-host "Get Object 3"
+$ThisStorageAdapter.Get()
+ConvertTo-Json ($thisStorageAdapter.GetStatistics())
+#>
 <#
 $thisStorageAdapter = [DiskStorageAdapter]::new("persistent.store")
 
@@ -40,6 +93,7 @@ $NewIndexedCollection.GetNextEntryIndex()
 #>
 
 #Load-BackedIndexCollection -Path "."
+<#
 write-host ""
 write-host "Generating Objects"
 measure-command {
@@ -154,4 +208,5 @@ $NewBackedIndexedCollection.EnableAutoFlush()
 $NewBackedIndexedCollection.DisableAutoFlush()
 
 $NewBackedIndexedCollection.GetMemoryReport()
-#>
+#>#>
+
