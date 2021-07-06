@@ -3,15 +3,15 @@ using module .\IndexedCollection.psm1
 Import-Module .\IndexedCollection.psm1 -Force
 
 remove-item "cache" -erroraction silentlycontinue
-$thisStorageAdapter = [CacheableFileStorageAdapter]::new("cache", [string])
+$thisStorageAdapter = [CacheableFileStorageAdapter]::new("cache")
 
 start-sleep -seconds 2
 
 $Adapters = @(
-    [CacheableFileStorageAdapter]::new("Cache", [string])
-    [StorageAdapter]::new([string])
-    [FileStorageAdapter]::new("file", [string])
-    [MemoryStorageAdapter]::new([string])
+    [CacheableFileStorageAdapter]::new("Cache")
+    [StorageAdapter]::new()
+    [FileStorageAdapter]::new("file")
+    [MemoryStorageAdapter]::new()
 )
 
 $item = "is simply dummy text of the printing and typesetting industry. Lorem Ipsum has been the industry's standard dummy text ever since the 1500s, when an unknown printer took a galley of type and scrambled it to make a type specimen book. It has survived not only five centuries, but also the leap into electronic typesetting, remaining essentially unchanged. It was popularised in the 1960s with the release of Letraset sheets containing Lorem Ipsum passages, and more recently with desktop publishing software like Aldus PageMaker including versions of Lorem Ipsum." * 100
@@ -30,7 +30,7 @@ foreach ($Adapter in $Adapters) {
     [void] ( $Adapter.Get() )
     $Three = $stopwatch.elapsedmilliseconds - $two
     
-    [void] ( $Adapter.Get() )
+    [void] ( $Adapter.GetJsonAsType([string]) )
     $Four = $stopwatch.elapsedmilliseconds - $Three
 
     write-host "$AdapterName took $two ms to write and $three ms to read a cache miss and $four ms to read a cache hit"

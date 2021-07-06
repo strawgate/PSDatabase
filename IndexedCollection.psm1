@@ -17,8 +17,9 @@ class IStorageAdapter {
 
     [int] $Reads
     [int] $Writes
-    
-    [Type] $Type
+
+    [scriptblock] $Serializer
+    [scriptblock] $Deserializer
 
     IStorageAdapter () {}
 
@@ -32,9 +33,10 @@ class StorageAdapter : IStorageAdapter {
     [int] $Reads = 0
     [int] $Writes = 0
 
-    [Type] $Type
+    [scriptblock] $Serializer = { param ($rawdata) write-output $rawdata }
+    [scriptblock] $Deserializer
     
-    StorageAdapter ([Type] $Type ) {$this.Type = $Type}
+    StorageAdapter ( ) {}
 
     [hashtable] GetStatistics () {
         return @{
@@ -42,6 +44,48 @@ class StorageAdapter : IStorageAdapter {
             "Writes" = $this.Writes
         }
     }
+
+    [void] UseJsonSerializer() {
+        $this.Serializer += {
+            param (
+                $Data
+            )
+
+            return (convertto-json $data)
+        }
+    }
+    
+    [void] UseJsonDeserializer() {
+        $this.Deserializer += {
+            param (
+                $Data
+            )
+
+            return (ConvertFrom-Json $data)
+        }
+    }
+    
+    [bool] HasDeserializer() {
+        return $this.Deserializer -ne $null
+    }
+    [bool] HasSerializer() {
+        return $this.Serializer -ne $null
+    }
+
+    [object] InvokeDeserializer([object] $Item) {
+        if ($this.HasDeserializer()) {
+            return & $this.Deserializer -Data $Item
+        }
+        return $Item
+    }
+
+    [object] InvokeSerializer([object] $Object) {
+        if ($this.HasSerializer()) {
+            return & $this.Serializer -Data $Object
+        }
+        return $Object
+    }
+
     [object] Get() { return $null}
     [void] Set([Object] $Data) { }
 }
@@ -55,17 +99,18 @@ class MemoryStorageAdapter : StorageAdapter {
 
     [object] $Data
 
-    MemoryStorageAdapter ([Type] $Type) : Base ($Type) {}
+    MemoryStorageAdapter () : Base () {}
 
     [object] Get() {
         $this.Reads ++
-        return $this.Data
+        $object = $this.InvokeDeserializer($this.Data)
+        return $object
     }
 
     [void] Set([object] $Data) {
         $this.Writes ++
-
-        $this.Data = $Data
+        $object = $this.InvokeSerializer($Data)
+        $this.Data = $Object
     }
 }
 
@@ -77,7 +122,7 @@ class FileStorageAdapter : StorageAdapter {
 
     [System.IO.FileInfo] $File
 
-    FileStorageAdapter ([string] $Path, [Type] $Type) : Base ($Type) {
+    FileStorageAdapter ([string] $Path) : Base () {
         if (-not (test-path $Path)) {
             new-item -itemtype file -path $Path -value "null"
         }
@@ -85,23 +130,17 @@ class FileStorageAdapter : StorageAdapter {
         $this.File = Get-Item $Path
     }
 
-    [object] GetAsType([Type] $Type) {
-        $Content = $this.Get()
-        $obj = [Newtonsoft.Json.JsonConvert]::DeserializeObject($Content, $Type, $script:jsonDataFileSerializerSettings)
-        return $Obj
-    }
-
-    [string] Get() {
+    [object] Get() {
         $this.Reads ++
-        return (Get-Content -raw $this.File)
+        $raw =  (Get-Content -raw $this.File)
+        $object = $this.InvokeDeserializer($raw)
+        return $object
     }
 
-    [void] Set([string] $Data) {
+    [void] Set([object] $Data) {
         $this.Writes ++
-
-        $json = [Newtonsoft.Json.JsonConvert]::SerializeObject($Data, $This.Type, $script:jsonDataFileSerializerSettings)
-
-        set-content -value $json -path $this.File.FullName
+        $object = $this.InvokeSerializer($Data)
+        Set-Content -value $Object -Path $this.File.FullName
     }
 }
 
@@ -119,9 +158,12 @@ class FileStorageAdapter : StorageAdapter {
 # Statistics:
 # This class also extends the statistics available for the storage adapter to include cache hits and misses
 class CacheableFileStorageAdapter : FileStorageAdapter {
-    [bool] $IsLoaded = $false
     [object] $Cache
-    [bool] $CacheBusted = $false
+
+    [object] $CacheAsType
+
+    [bool] $IsLoaded = $false
+    [bool] $IsPersisted = $false
 
     [int] $CacheHits = 0
     [int] $CacheMisses = 0
@@ -129,7 +171,7 @@ class CacheableFileStorageAdapter : FileStorageAdapter {
 
     [bool] $AutoFlush = $true
 
-    CacheableFileStorageAdapter ([string] $Path, [Type] $Type) : Base ($Path, $Type) {}
+    CacheableFileStorageAdapter ([string] $Path) : Base ($Path) {}
 
     [hashtable] GetStatistics () {
         return @{
@@ -140,10 +182,11 @@ class CacheableFileStorageAdapter : FileStorageAdapter {
             "Cache Clears" = $this.CacheClears
         }
     }
-
+    
     [void] SetCache([object] $Data) {
         $this.Cache = $Data
-        $this.CacheBusted = $true
+        $this.CacheAsType = $null
+        $this.IsPersisted = $false
         $this.IsLoaded = $true
     }
 
@@ -157,7 +200,7 @@ class CacheableFileStorageAdapter : FileStorageAdapter {
     [void] ClearCache() {
         $this.Cache = $null
         $this.IsLoaded = $false
-        $this.CacheBusted = $false
+        $this.IsPersisted = $false
         $this.CacheClears++
     }
 
@@ -166,8 +209,9 @@ class CacheableFileStorageAdapter : FileStorageAdapter {
     }
 
     [void] Flush () {
-        if ($this.CacheBusted) {
+        if (-not ($this.IsPersisted)) {
             ([FileStorageAdapter] $this).Set($this.GetCache())
+            $this.IsPersisted = $true
         }
     }
 
@@ -178,8 +222,27 @@ class CacheableFileStorageAdapter : FileStorageAdapter {
             $this.Flush()
         }
     }
+    
+    [void] SetObjectAsJson ([object] $Object) {
+        $json = [Newtonsoft.Json.JsonConvert]::SerializeObject($Object, $This.Type, $script:jsonDataFileSerializerSettings)
+        $this.SetCache($json)
 
-    [object] Get () {
+        if ($this.AutoFlush) {
+            $this.Flush()
+        }
+    }
+
+    [object] GetJsonAsType([Type] $Type) {
+        if ($this.CacheAsType -eq $null -or $this.CacheAsType.GetType() -isnot $Type) {
+            $object = ([FileStorageAdapter] $this).GetJsonAsType($Type)
+            $this.CacheAsType = $object
+            return $object
+        }
+        
+        return $this.CacheAsType
+    }
+
+    [string] Get () {
         # If it's not in our cache go read it into our cache
         if (-not $this.isLoaded) {
             $this.CacheMisses ++
@@ -191,6 +254,64 @@ class CacheableFileStorageAdapter : FileStorageAdapter {
         }
         
         return $this.GetCache()
+    }
+}
+
+Class CachableObject {
+    [StorageAdapter] $StorageAdapter
+    
+    hidden [object] $Cache
+
+    [bool] $isLoaded
+
+    [bool] $CacheWrites
+    [bool] $CacheReads
+
+    [bool] GetIsLoaded() {
+        return $this.isLoaded()
+    }
+
+    [void] OverrideCache( [object] $Data ) {
+        $this.Cache = $Data
+        $this.isLoaded = $true
+    }
+    [void] ClearCache() {
+        $this.Cache = $null
+        $this.isLoaded = $false
+    }
+
+    [void] LoadCache() {
+        if (-not $this.isLoaded) {
+            $this.Cache = $this.StorageAdapter.Get()
+            $this.isLoaded = $true
+        }
+    }
+
+    [object] GetCache() {
+        if (-not $this.isLoaded) {
+            throw "Requested Object not in Cache"
+        }
+        return $this.Cache
+    }
+
+    [void] Flush() {
+        $this.StorageAdapter.Set()
+    }
+
+    [void] SetValue([object] $Data) {
+        $this.OverrideCache($Data)
+
+        if ($this.AutoFlush) {
+            $this.Flush()
+        }
+    }
+
+    [object] GetValue() {
+        if ($this.isLoaded) {
+            return $this.GetCache()
+        }
+        
+        return $this.StorageAdapter.Get()
     }
 }
 
