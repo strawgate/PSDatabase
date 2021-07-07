@@ -3,8 +3,114 @@ using module .\IndexedCollection.psm1
 Import-Module .\IndexedCollection.psm1 -Force
 
 remove-item "cache" -erroraction silentlycontinue
-$thisStorageAdapter = [CacheableFileStorageAdapter]::new("cache")
+$Script:Names = @("Jamie", "Gus", "Sharonda", "Nicholas", "Rafael", "Coy", "Chrystal", "Normand", "Jillian", "Fatimah", "Katina", "Kenyetta", "Linnie", "Catina", "Elouise", "Marx", "Julianne", "Pauletta", "Hana", "Michelina")
 
+Function New-RandomObject {
+
+    return @{
+            "first name" = ($Script:Names | get-random)
+            "last name"  = ($Script:Names | get-random)
+            "height"     = (get-random -minimum 1 -maximum 100)
+        }
+
+}
+
+
+$Collection = [IndexedCachableCollection]::new()
+
+$Collection.Add((New-RandomObject))
+$Collection.Add((New-RandomObject))
+$Collection.Add((New-RandomObject))
+$Collection.Add((New-RandomObject))
+$Collection.Add((New-RandomObject))
+
+#$thisStorageAdapter = [CacheableFileStorageAdapter]::new("cache")
+
+$StorageAdapter = [FileStorageAdapter]::new(".\FileCache")
+$indexedObject = [IndexedCachableObject]::new([hashtable], @{"tomato" = 7; "potato" = 9}, "tomato", $storageAdapter)
+
+$CollectionStorageAdapter = [FileStorageAdapter]::new(".\collection.json")
+$IndexedCollection = [IndexedCachableCollection]::new("first name", $CollectionStorageAdapter)
+$IndexedCollection.Add($IndexedObject)
+
+$IndexedCollection.setAutoFlush($false)
+foreach ($i in 1..10000) {
+
+    if ($i % 1000 -eq 0) {
+        write-host "$i of 10000"
+    }
+    $thisObj = New-RandomObject
+
+    $thisId = $IndexedCollection.GetNextAvailableId()
+    
+    $thisFile = "data\$thisId.json"
+
+    $StorageAdapter = [FileStorageAdapter]::new($ThisFile)
+
+    $IndexedCollection.Add($thisObj, $StorageAdapter)
+
+    #write-host "$Duration, " -nonewline
+}
+
+$IndexedCollection.setAutoFlush($true)
+
+$Return = $IndexedCollection.GetValuesByNameAndValue("first name", "Jamie")
+$Return = $IndexedCollection.GetValuesByNameAndValue("first name", "Jamie")
+$Return = $IndexedCollection.GetValuesByNameAndValue("first name", "Jamie")
+$Return = $IndexedCollection.GetValuesByNameAndValue("first name", "Jamie")
+$Return = $IndexedCollection.GetValuesByNameAndValue("first name", "Jamie")
+write-host ""
+write-host "GetStatistics()"
+ConvertTo-Json $IndexedCollection.GetStatistics()
+write-host ""
+write-host "Get Values()"
+#$IndexedCollection.GetValues()
+write-host ""
+write-host "Get()"
+#$IndexedCollection.Get()
+write-host ""
+write-host "GetStatistics()"
+ConvertTo-Json $IndexedCollection.GetStatistics()
+write-host ""
+write-host "GarbageCollection()"
+$IndexedCollection.GarbageCollection(5)
+write-host ""
+write-host "GetStatistics()"
+ConvertTo-Json $IndexedCollection.GetStatistics()
+write-host ""
+write-host "Unload()"
+$IndexedCollection.Unload()
+get-process -pid $pid
+write-host ""
+write-host "GetStatistics()"
+ConvertTo-Json $IndexedCollection.GetStatistics()
+write-host ""
+write-host "Prewarm()"
+$IndexedCollection.Prewarm()
+get-process -pid $pid
+
+write-host ""
+write-host "GetStatistics()"
+ConvertTo-Json $IndexedCollection.GetStatistics()
+
+write-host ""
+write-host "Load()"
+ConvertTo-Json $IndexedCollection.Load()
+get-process -pid $pid
+
+write-host ""
+write-host "GetStatistics()"
+ConvertTo-Json $IndexedCollection.GetStatistics()
+
+$NewCollection = [IndexedCachableCollection]::Load(".")
+
+ConvertTo-Json $NewCollection.Get()[0].GetStatistics()
+<#
+$IndexedObject.GetProjection()
+ConvertTo-Json $indexedObject.GetStatistics()
+$IndexedObject.GetValue()
+ConvertTo-Json $indexedObject.GetStatistics()
+$indexedObject
 start-sleep -seconds 2
 
 $Adapters = @(

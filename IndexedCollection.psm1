@@ -2,7 +2,7 @@ $script:jsonMetaDataSerializerSettings = [Newtonsoft.Json.JsonSerializerSettings
  
 $script:jsonMetaDataSerializerSettings.Formatting = [Newtonsoft.Json.Formatting]::Indented
 $script:jsonMetaDataSerializerSettings.NullValueHandling  = [Newtonsoft.Json.NullValueHandling]::Ignore
-$script:jsonMetaDataSerializerSettings.TypeNameHandling = [Newtonsoft.Json.TypeNameHandling]::Arrays
+$script:jsonMetaDataSerializerSettings.TypeNameHandling = [Newtonsoft.Json.TypeNameHandling]::Auto
 
 $script:jsonDataFileSerializerSettings = [Newtonsoft.Json.JsonSerializerSettings]::new()
  
@@ -18,14 +18,15 @@ class IStorageAdapter {
     [int] $Reads
     [int] $Writes
 
-    [scriptblock] $Serializer
-    [scriptblock] $Deserializer
+    [scriptblock[]] $Serializer
+    [scriptblock[]] $Deserializer
 
     IStorageAdapter () {}
 
     [object] GetStatistics () { throw "Do not call methods on an interface." }
+
     [object] Get() { throw "Do not call methods on an interface." }
-    [void] Set() { throw "Do not call methods on an interface." }
+    [void] Set([Object] $Data) { throw "Do not call methods on an interface." }
 }
 
 class StorageAdapter : IStorageAdapter {
@@ -33,10 +34,7 @@ class StorageAdapter : IStorageAdapter {
     [int] $Reads = 0
     [int] $Writes = 0
 
-    [scriptblock] $Serializer = { param ($rawdata) write-output $rawdata }
-    [scriptblock] $Deserializer
-    
-    StorageAdapter ( ) {}
+    StorageAdapter () {}
 
     [hashtable] GetStatistics () {
         return @{
@@ -45,72 +43,33 @@ class StorageAdapter : IStorageAdapter {
         }
     }
 
-    [void] UseJsonSerializer() {
-        $this.Serializer += {
-            param (
-                $Data
-            )
-
-            return (convertto-json $data)
-        }
+    [object] Get() { 
+        $this.Reads++
+        return $null
     }
-    
-    [void] UseJsonDeserializer() {
-        $this.Deserializer += {
-            param (
-                $Data
-            )
-
-            return (ConvertFrom-Json $data)
-        }
+    [void] Set([Object] $Data) {
+        $this.Writes ++
     }
-    
-    [bool] HasDeserializer() {
-        return $this.Deserializer -ne $null
-    }
-    [bool] HasSerializer() {
-        return $this.Serializer -ne $null
-    }
-
-    [object] InvokeDeserializer([object] $Item) {
-        if ($this.HasDeserializer()) {
-            return & $this.Deserializer -Data $Item
-        }
-        return $Item
-    }
-
-    [object] InvokeSerializer([object] $Object) {
-        if ($this.HasSerializer()) {
-            return & $this.Serializer -Data $Object
-        }
-        return $Object
-    }
-
-    [object] Get() { return $null}
-    [void] Set([Object] $Data) { }
 }
 
 ## This storage adapter keeps objects in memory for persistence. Reads and writes to and from memory storage
 # are just reads and writes to and from memory
 class MemoryStorageAdapter : StorageAdapter {
 
-    [int] $Reads = 0
-    [int] $Writes = 0
-
     [object] $Data
 
-    MemoryStorageAdapter () : Base () {}
+    MemoryStorageAdapter () {}
 
     [object] Get() {
-        $this.Reads ++
-        $object = $this.InvokeDeserializer($this.Data)
-        return $object
+        ([StorageAdapter] $this).Get()
+
+        return $this.Data
     }
 
     [void] Set([object] $Data) {
-        $this.Writes ++
-        $object = $this.InvokeSerializer($Data)
-        $this.Data = $Object
+        ([StorageAdapter] $this).Set($Data)
+
+        $this.Data = $Data
     }
 }
 
@@ -120,170 +79,145 @@ class MemoryStorageAdapter : StorageAdapter {
 
 class FileStorageAdapter : StorageAdapter {
 
+	[Newtonsoft.Json.JsonIgnoreAttribute()]
     [System.IO.FileInfo] $File
+
+    [string] $Path
 
     FileStorageAdapter ([string] $Path) : Base () {
         if (-not (test-path $Path)) {
             new-item -itemtype file -path $Path -value "null"
         }
-
+        $this.Path = $Path
         $this.File = Get-Item $Path
     }
 
     [object] Get() {
-        $this.Reads ++
+        ([StorageAdapter] $this).Get()
+
         $raw =  (Get-Content -raw $this.File)
-        $object = $this.InvokeDeserializer($raw)
-        return $object
+        return $raw
     }
 
     [void] Set([object] $Data) {
-        $this.Writes ++
-        $object = $this.InvokeSerializer($Data)
-        Set-Content -value $Object -Path $this.File.FullName
-    }
-}
-
-## This class is a caching version of the FileStorageAdapter
-#
-# Reads:
-# The first time an object is read it is read into a memory cache, further reads are performed from the memory cache when possible. The cache
-# can be unloaded using Unload().
-#
-# Writes:
-# Writes are done to the in memory cache first and then flushed to disk. If AutoFlush is enabled this occurs every time a write is performed.
-# If AutoFlush is disabled this will not occur. With Autoflush disabled A Get() may return a different value than what's on disk. 
-# You will have to manually call flush to achieve data persistence.
-#
-# Statistics:
-# This class also extends the statistics available for the storage adapter to include cache hits and misses
-class CacheableFileStorageAdapter : FileStorageAdapter {
-    [object] $Cache
-
-    [object] $CacheAsType
-
-    [bool] $IsLoaded = $false
-    [bool] $IsPersisted = $false
-
-    [int] $CacheHits = 0
-    [int] $CacheMisses = 0
-    [int] $CacheClears = 0
-
-    [bool] $AutoFlush = $true
-
-    CacheableFileStorageAdapter ([string] $Path) : Base ($Path) {}
-
-    [hashtable] GetStatistics () {
-        return @{
-            "Reads" = $this.Reads
-            "Writes" = $this.Writes
-            "Cache Hits" = $this.CacheHits
-            "Cache Misses" = $this.CacheMisses
-            "Cache Clears" = $this.CacheClears
-        }
-    }
-    
-    [void] SetCache([object] $Data) {
-        $this.Cache = $Data
-        $this.CacheAsType = $null
-        $this.IsPersisted = $false
-        $this.IsLoaded = $true
-    }
-
-    [object] GetCache() {
-        if ($this.isLoaded) {
-            return $this.Cache
-        }
-        return $null
-    }
-
-    [void] ClearCache() {
-        $this.Cache = $null
-        $this.IsLoaded = $false
-        $this.IsPersisted = $false
-        $this.CacheClears++
-    }
-
-    [void] SetAutoFlush([bool] $enable) {
-        $this.AutoFlush = $Enable
-    }
-
-    [void] Flush () {
-        if (-not ($this.IsPersisted)) {
-            ([FileStorageAdapter] $this).Set($this.GetCache())
-            $this.IsPersisted = $true
-        }
-    }
-
-    [void] Set ([Object] $Data) {
-        $this.SetCache($Data)
-
-        if ($this.AutoFlush) {
-            $this.Flush()
-        }
-    }
-    
-    [void] SetObjectAsJson ([object] $Object) {
-        $json = [Newtonsoft.Json.JsonConvert]::SerializeObject($Object, $This.Type, $script:jsonDataFileSerializerSettings)
-        $this.SetCache($json)
-
-        if ($this.AutoFlush) {
-            $this.Flush()
-        }
-    }
-
-    [object] GetJsonAsType([Type] $Type) {
-        if ($this.CacheAsType -eq $null -or $this.CacheAsType.GetType() -isnot $Type) {
-            $object = ([FileStorageAdapter] $this).GetJsonAsType($Type)
-            $this.CacheAsType = $object
-            return $object
-        }
-        
-        return $this.CacheAsType
-    }
-
-    [string] Get () {
-        # If it's not in our cache go read it into our cache
-        if (-not $this.isLoaded) {
-            $this.CacheMisses ++
-            # Go out to the disk
-            $ObjectFromDisk = ([FileStorageAdapter] $this).Get()
-            $this.SetCache($ObjectFromDisk)
-        } else {
-            $this.CacheHits ++
-        }
-        
-        return $this.GetCache()
+        ([StorageAdapter] $this).Set($Data)
+        Set-Content -value $Data -Path $this.File.FullName
     }
 }
 
 Class CachableObject {
+    
     [StorageAdapter] $StorageAdapter
     
+	[Newtonsoft.Json.JsonIgnoreAttribute()]
     hidden [object] $Cache
 
+    [type] $Type
+
+	[Newtonsoft.Json.JsonIgnoreAttribute()]
     [bool] $isLoaded
 
-    [bool] $CacheWrites
-    [bool] $CacheReads
+	[Newtonsoft.Json.JsonIgnoreAttribute()]
+    [bool] $AutoFlush = $true
+    
+    [datetime] $LastAccess = [datetime] 0
+    [int] $CacheHits = 0
+    [int] $CacheMisses = 0
+    [int] $CacheFlushes = 0
+    [int] $CacheWrites = 0
+    [int] $CacheUnloads = 0
+    [int] $CachePrewarms = 0
 
+
+    CachableObject ([Type] $Type, [StorageAdapter] $StorageAdapter) {
+        $this.StorageAdapter = $StorageAdapter
+        $this.Type = $Type
+        $this.Initialize()
+    }
+
+    CachableObject ([Type] $Type, [Object] $Object, [StorageAdapter] $StorageAdapter) {
+        $this.StorageAdapter = $StorageAdapter
+        $this.Type = $Type
+        $this.SetValue($Object)
+        $this.Initialize()
+    }
+    CachableObject ([Type] $Type, [Object] $Object) {
+        $this.StorageAdapter = [MemoryStorageAdapter]::new()
+        $this.Type = $Type
+        $this.SetValue($Object)
+        $this.Initialize()
+    }
+
+    CachableObject ([Type] $Type) {
+        $this.StorageAdapter = [MemoryStorageAdapter]::new()
+        $this.Type = $Type
+        $this.Initialize()
+    }
+
+    [void] Initialize () {
+        #$this.StorageAdapter.Flush()
+    }
+    
+    [hashtable] GetCacheStatistics() {
+        $newHt = @{}
+
+        $newHt.Add("Hits",      $this.CacheHits)
+        $newHt.Add("Misses",    $this.CacheMisses)
+        $newHt.Add("Flushes",   $this.CacheFlushes)
+        $newHt.Add("Writes",    $this.CacheWrites)
+        $newHt.Add("Unloads",   $this.CacheUnloads)
+        $newHt.Add("Prewarms",  $this.CachePrewarms)
+
+        return $NewHt
+    }
+    [hashtable] GetStatistics () {
+        $FinalStatistics = @{}
+
+        $FinalStatistics["Storage"] = $this.StorageAdapter.GetStatistics()
+        $FinalStatistics["Cache"] = $this.GetCacheStatistics()
+        $FinalStatistics["Meta"] = @{
+            "isLoaded" = $this.IsLoaded
+        }
+        return $FinalStatistics
+    }
+
+    [void] Prewarm () {
+        if (-not ($this.GetIsLoaded())) {
+            $this.CachePrewarms ++
+            $this.LoadCache()
+        } 
+    }
     [bool] GetIsLoaded() {
-        return $this.isLoaded()
+        return $this.isLoaded
     }
 
     [void] OverrideCache( [object] $Data ) {
         $this.Cache = $Data
         $this.isLoaded = $true
+
+        $this.CacheWrites ++
+
     }
+
+    [void] Load() {
+        $this.LoadCache()
+    }
+
+    [void] Unload() {
+        $this.ClearCache()
+    }
+
     [void] ClearCache() {
         $this.Cache = $null
         $this.isLoaded = $false
+        $this.CacheUnloads ++
     }
 
     [void] LoadCache() {
         if (-not $this.isLoaded) {
-            $this.Cache = $this.StorageAdapter.Get()
-            $this.isLoaded = $true
+            $Json = $this.StorageAdapter.Get()
+            $Object = [Newtonsoft.Json.JsonConvert]::DeserializeObject($Json, $this.Type, $script:jsonDataFileSerializerSettings)
+            $this.OverrideCache($Object)
         }
     }
 
@@ -295,7 +229,9 @@ Class CachableObject {
     }
 
     [void] Flush() {
-        $this.StorageAdapter.Set()
+        $this.CacheFlushes ++
+        $json = [Newtonsoft.Json.JsonConvert]::SerializeObject($this.GetCache(), $script:jsonDataFileSerializerSettings)
+        $this.StorageAdapter.Set($json)
     }
 
     [void] SetValue([object] $Data) {
@@ -307,14 +243,338 @@ Class CachableObject {
     }
 
     [object] GetValue() {
+        $result = $null
+
         if ($this.isLoaded) {
-            return $this.GetCache()
+            $this.CacheHits++
         }
-        
-        return $this.StorageAdapter.Get()
+        else {
+            $this.CacheMisses++
+            $This.LoadCache()
+        }
+
+        $this.LastAccess = [datetime]::now
+
+        $result = $this.GetCache()
+
+        if ($Result -isnot $This.Type) {
+            return [Convert]::ChangeType($Result, $this.Type)
+        } else {
+            return $Result
+        }
     }
 }
 
+class IndexedCachableObject : CachableObject {
+    [int] $id
+    [hashtable] $Indices = @{}
+    [string[]] $IndexNames = @()
+
+
+    [Newtonsoft.Json.JsonConstructorAttribute()]
+    IndexedCachableObject ([Type] $Type, [string[]] $IndexNames, [StorageAdapter] $StorageAdapter) : Base ([Type] $Type, [StorageAdapter] $StorageAdapter) {
+        $this.IndexNames = $IndexNames
+    }
+
+    IndexedCachableObject ([Type] $Type, [Object] $Object, [string[]] $IndexNames, [StorageAdapter] $StorageAdapter) : Base ([Type] $Type, [Object] $Object, [StorageAdapter] $StorageAdapter) {
+        $this.IndexNames = $IndexNames
+        $this.Reindex()
+    }
+    IndexedCachableObject ([Type] $Type, [Object] $Object, [StorageAdapter] $StorageAdapter) : Base ([Type] $Type, [Object] $Object, [StorageAdapter] $StorageAdapter) { }
+
+    IndexedCachableObject([Type] $Type, [Object] $Object) : Base([Type] $Type, [Object] $Object) { 
+        $this.Reindex()
+    }
+
+    [void] AddIndex([string] $Name) {
+        $this.IndexNames += $Name
+        $this.ReIndex()
+    }
+
+    [hashtable] GetProjection() {
+        $newht = @{}
+
+        foreach ($IndexKV in $this.Indices.GetEnumerator()) {
+            $IndexName = $IndexKV.name
+            $Value = $IndexKV.Value
+            $newht.add($IndexName, $Value)
+        }
+
+        return $newht
+    }
+    
+    [void] Reindex() {
+        $object = $This.GetValue()
+
+        $this.Indices = @{}
+
+        foreach ($IndexName in $this.IndexNames) {
+            $thisValueForIndexName = $Object.$IndexName
+            $this.Indices[$IndexName] = $thisValueForIndexName
+        }
+    }
+
+    [void] Reindex([string[]] $IndexNames) {
+        $object = $This.GetValue()
+
+        $this.Indices = @{}
+
+        foreach ($IndexName in $IndexNames) {
+            $thisValueForIndexName = $Object.$IndexName
+            $this.Indices[$IndexName] = $thisValueForIndexName
+        }
+    }
+}
+
+class IndexedCachableCollection {
+    
+    [StorageAdapter] $MetadataAdapter
+
+    [hashtable] $Indices = @{}
+    [string[]] $IndexNames = @()
+
+    [Collections.Generic.List[IndexedCachableObject]] $Members = @()
+
+	[Newtonsoft.Json.JsonIgnoreAttribute()]
+    [Hashtable] $MembersById = @{}
+
+	[Newtonsoft.Json.JsonIgnoreAttribute()]
+    [bool] $AutoFlush = $true
+
+    IndexedCachableCollection () {
+        $this.Initialize(@(), [MemoryStorageAdapter]::new())
+    }
+    IndexedCachableCollection ([StorageAdapter] $MetadataAdapter) {
+        $this.Initialize(@(), $MetadataAdapter)
+    }
+    IndexedCachableCollection ([string[]] $IndexNames) {
+        $this.Initialize($IndexNames, [MemoryStorageAdapter]::new())
+    }
+    IndexedCachableCollection ([string[]] $IndexNames, [StorageAdapter] $MetadataAdapter) {
+        $this.Initialize($IndexNames, $MetadataAdapter)
+    }
+    
+    IndexedCachableCollection ([string[]] $IndexNames, [IndexedCachableObject] $Members) {
+        $this.Initialize($IndexNames, [MemoryStorageAdapter]::new())
+        foreach ($Member iN $Members) {
+            $this.Add($Member)
+        }
+
+    }
+    IndexedCachableCollection ([string[]] $IndexNames, [IndexedCachableObject] $Members, [StorageAdapter] $MetadataAdapter) {
+        $this.Initialize($IndexNames, $MetadataAdapter)
+        foreach ($Member iN $Members) {
+            $this.Add($Member)
+        }
+
+    }
+
+    static [IndexedCachableCollection] Load ($Path) {
+        $MetadataJson = Get-Content -raw (Join-Path $Path "collection.json")
+        
+        $MetadataObj = [Newtonsoft.Json.JsonConvert]::DeserializeObject($MetadataJson, [IndexedCachableCollection], $script:jsonMetaDataSerializerSettings)
+
+        return $MetadataObj
+    }
+
+    [void] Initialize([string[]] $IndexNames, [StorageAdapter] $MetadataAdapter) {
+        foreach ($indexName in $IndexNames) {
+            $this.AddIndex($IndexName)
+        }
+        $this.MetadataAdapter = $MetadataAdapter
+    }
+
+    [void] SetAutoFlush([bool] $bool) {
+        $this.AutoFlush = $bool
+    }
+
+    [void] Prewarm() {
+        [int] $count = 0
+        [int] $sum = 0
+        foreach ($Member in $this.Members) {
+            $theseStatistics = $Member.GetCacheStatistics()
+
+            $count ++ 
+            $sum += $theseStatistics.Hits +  $theseStatistics.Misses
+        }
+
+        $Average = $Sum / $Count
+
+        foreach ($Member in $this.Members) {
+            $theseStatistics = $Member.GetCacheStatistics()
+
+            if (($theseStatistics.Hits +  $theseStatistics.Misses) -gt $Average) {
+                $member.Prewarm()
+            }
+        }
+
+    }
+
+    [hashtable] GetStatistics () {
+        
+        $Loaded = 0
+        $NotLoaded = 0
+
+        foreach ($Member in $this.Members) {
+            if ($Member.isLoaded){
+                $Loaded ++
+            }
+             else {
+                 $NotLoaded ++
+             }
+        }
+
+        return @{
+            "Loaded" = $Loaded
+            "Not Loaded" = $NotLoaded
+        }
+    }
+
+    [int] GetNextAvailableId() {
+        return $this.Members.Count
+    }
+    [void] AddIndex ([string] $IndexName) {
+        $this.IndexNames += $IndexName
+        $this.ReIndexAll()
+    }
+
+    [void] AddIndices ([string[]] $IndexNames) {
+        $this.IndexNames += $IndexNames
+        $this.ReIndexAll()
+    }
+
+    [void] ReIndexMember([IndexedCachableObject] $Member) {
+        $this.ReindexMember($Member, $False)
+    }
+
+    [void] ReIndexMember([IndexedCachableObject] $Member, [bool] $Force) {
+        if ($Force) { $member.ReIndex() }
+
+        $Object = $member.GetValue()
+        foreach ($IndexName in $this.IndexNames) {
+            $MemberValue = $Object.$IndexName
+
+            # This object doesn't contain a value for one of our indices. Skip.
+            if ($MemberValue -eq $Null) {
+                continue;
+            }
+
+            if (-not ($this.Indices[$IndexName].ContainsKey($MemberValue))) {
+                $this.Indices[$IndexName][$MemberValue] = [System.Collections.Arraylist]::new()
+            }
+
+            $this.Indices[$IndexName][$MemberValue].Add($Member.Id)
+        }
+    }
+
+    [void] GarbageCollection([int] $Minutes) {
+        foreach ($Member in $this.Members) {
+            $cutoff = ([datetime]::now).addMinutes((-1 * $Minutes))
+            if ($Member.LastAccess -lt $cutoff) {
+                $Member.Unload()
+            }
+        }
+    }
+    
+    [void] Load() {
+        foreach ($Member in $this.Members) {
+            $Member.Load()
+        }
+    }
+    [void] Unload() {
+        foreach ($Member in $this.Members) {
+            $Member.Unload()
+        }
+    }
+
+    [void] ReIndexAll() {
+        $This.ReIndexAll($False)
+    }
+
+    [void] ReIndexAll([bool] $Force) {
+        foreach ($IndexName in $this.IndexNames) {
+            $this.Indices[$IndexName] = @{}
+        }
+
+        foreach ($Member in $this.Members) {
+            if ($Force) { $Member.ReIndex()}
+            
+            $this.ReIndexMember($Member)
+        }
+    }
+
+    [void] Flush () {
+        $Object = [Newtonsoft.Json.JsonConvert]::SerializeObject($This, $This.GetType(), $script:jsonMetadataSerializerSettings)
+        $This.MetadataAdapter.Set($Object)
+    }
+
+    [void] Add([Object] $Object) {
+
+        $StorageAdapter = [MemoryStorageAdapter]::new()
+        $This.Add($Object, $StorageAdapter)
+    }
+
+    [void] Add([Object] $Object, [StorageAdapter] $StorageAdapter) {
+
+        $thisNewMember = [IndexedCachableObject]::new($Object.GetType(), $Object, $This.IndexNames, $StorageAdapter)
+
+        $thisNewMember.Id = $this.GetNextAvailableId()
+        
+        $this.Members.Add($thisNewMember)
+        $this.MembersById.Add($thisNewMember.Id, $thisNewMember)
+
+        $this.ReIndexMember($thisNewMember)
+
+        if ($this.AutoFlush) {
+            $this.Flush()
+        }
+    }
+
+    [void] Add([IndexedCachableObject] $NewMember) {
+        $NewMember.Id = $this.GetNextAvailableId()
+        
+        $this.Members.Add($NewMember)
+        $this.MembersById.Add($NewMember.Id, $NewMember)
+
+        $this.ReIndexMember($NewMember)
+
+        if ($this.AutoFlush) {
+            $this.Flush()
+        }
+    }
+
+    [IndexedCachableObject[]] Get() {
+        return $This.Members
+    }
+    [IndexedCachableObject] Get([int] $Id) {
+        return $This.MembersById[$Id]
+    }
+    
+    [IndexedCachableObject[]] Get([int[]] $Ids) {
+        $theseResults = [Collections.Generic.List[IndexedCachableObject]]::new()
+
+        foreach ($id in $ids) {
+            $theseResults.Add($This.Get($Id))
+        }
+
+        return $theseResults.ToArray()
+    }
+
+
+    [object[]] GetValues() {
+        return @($This.Get()).Foreach{$_.GetValue()}
+    }
+
+    [object[]] GetByNameAndValue([string] $Name, [object] $Value) {
+        $MatchingIds = $This.Indices[$Name][$Value]
+        
+        return $this.Get($MatchingIds)
+    }
+
+    [object[]] GetValuesByNameAndValue([string] $Name, [object] $Value) {
+        return @($this.GetByNameAndValue($Name, $Value)).Foreach{$_.GetValue()}
+    }
+}
 <#
 
 class StorageAdapter : IStorageAdapter {
